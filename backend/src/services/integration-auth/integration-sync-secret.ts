@@ -18,7 +18,7 @@ import {
   UpdateSecretCommand
 } from "@aws-sdk/client-secrets-manager";
 import { Octokit } from "@octokit/rest";
-import AWS from "aws-sdk";
+import AWS, { AWSError } from "aws-sdk";
 import { AxiosError } from "axios";
 import sodium from "libsodium-wrappers";
 import isEqual from "lodash.isequal";
@@ -31,6 +31,7 @@ import { logger } from "@app/lib/logger";
 import { TCreateManySecretsRawFn, TUpdateManySecretsRawFn } from "@app/services/secret/secret-types";
 
 import { TIntegrationDALFactory } from "../integration/integration-dal";
+import { IntegrationMetadataSchema } from "../integration/integration-schema";
 import {
   IntegrationInitialSyncBehavior,
   IntegrationMappingBehavior,
@@ -451,7 +452,11 @@ const syncSecretsAWSParameterStore = async ({
   accessId: string | null;
   accessToken: string;
 }) => {
-  if (!accessId) return;
+  let response: { isSynced: boolean; syncMessage: string } | null = null;
+
+  if (!accessId) {
+    throw new Error("AWS access ID is required");
+  }
 
   const config = new AWS.Config({
     region: integration.region as string,
@@ -556,6 +561,11 @@ const syncSecretsAWSParameterStore = async ({
                 `AWS Parameter Store Error [integration=${integration.id}]: double check AWS account permissions (refer to the Infisical docs)`
               );
             }
+
+            response = {
+              isSynced: false,
+              syncMessage: (err as AWSError)?.message || "Error syncing with AWS Parameter Store"
+            };
           }
         }
       }
@@ -584,6 +594,8 @@ const syncSecretsAWSParameterStore = async ({
       }
     }
   }
+
+  return response;
 };
 
 /**
@@ -602,7 +614,9 @@ const syncSecretsAWSSecretManager = async ({
 }) => {
   const metadata = z.record(z.any()).parse(integration.metadata || {});
 
-  if (!accessId) return;
+  if (!accessId) {
+    throw new Error("AWS access ID is required");
+  }
 
   const secretsManager = new SecretsManagerClient({
     region: integration.region as string,
@@ -721,7 +735,7 @@ const syncSecretsAWSSecretManager = async ({
         }
       }
     } catch (err) {
-      // case when AWS manager can't find the specified secret
+      // case 1: when AWS manager can't find the specified secret
       if (err instanceof ResourceNotFoundException && secretsManager) {
         await secretsManager.send(
           new CreateSecretCommand({
@@ -733,6 +747,9 @@ const syncSecretsAWSSecretManager = async ({
               : []
           })
         );
+        // case 2: something unexpected went wrong, so we'll throw the error to reflect the error in the integration sync status
+      } else {
+        throw err;
       }
     }
   };
@@ -752,14 +769,12 @@ const syncSecretsAWSSecretManager = async ({
 const syncSecretsHeroku = async ({
   createManySecretsRawFn,
   updateManySecretsRawFn,
-  integrationDAL,
   integration,
   secrets,
   accessToken
 }: {
   createManySecretsRawFn: (params: TCreateManySecretsRawFn) => Promise<Array<TSecrets & { _id: string }>>;
   updateManySecretsRawFn: (params: TUpdateManySecretsRawFn) => Promise<Array<TSecrets & { _id: string }>>;
-  integrationDAL: Pick<TIntegrationDALFactory, "updateById">;
   integration: TIntegrations & {
     projectId: string;
     environment: {
@@ -861,10 +876,6 @@ const syncSecretsHeroku = async ({
       }
     }
   );
-
-  await integrationDAL.updateById(integration.id, {
-    lastUsed: new Date()
-  });
 };
 
 /**
@@ -1363,38 +1374,41 @@ const syncSecretsGitHub = async ({
     }
   }
 
-  for await (const encryptedSecret of encryptedSecrets) {
-    if (
-      !(encryptedSecret.name in secrets) &&
-      !(appendices?.prefix !== undefined && !encryptedSecret.name.startsWith(appendices?.prefix)) &&
-      !(appendices?.suffix !== undefined && !encryptedSecret.name.endsWith(appendices?.suffix))
-    ) {
-      switch (integration.scope) {
-        case GithubScope.Org: {
-          await octokit.request("DELETE /orgs/{org}/actions/secrets/{secret_name}", {
-            org: integration.owner as string,
-            secret_name: encryptedSecret.name
-          });
-          break;
-        }
-        case GithubScope.Env: {
-          await octokit.request(
-            "DELETE /repositories/{repository_id}/environments/{environment_name}/secrets/{secret_name}",
-            {
-              repository_id: Number(integration.appId),
-              environment_name: integration.targetEnvironmentId as string,
+  const metadata = IntegrationMetadataSchema.parse(integration.metadata);
+  if (metadata.shouldEnableDelete) {
+    for await (const encryptedSecret of encryptedSecrets) {
+      if (
+        !(encryptedSecret.name in secrets) &&
+        !(appendices?.prefix !== undefined && !encryptedSecret.name.startsWith(appendices?.prefix)) &&
+        !(appendices?.suffix !== undefined && !encryptedSecret.name.endsWith(appendices?.suffix))
+      ) {
+        switch (integration.scope) {
+          case GithubScope.Org: {
+            await octokit.request("DELETE /orgs/{org}/actions/secrets/{secret_name}", {
+              org: integration.owner as string,
               secret_name: encryptedSecret.name
-            }
-          );
-          break;
-        }
-        default: {
-          await octokit.request("DELETE /repos/{owner}/{repo}/actions/secrets/{secret_name}", {
-            owner: integration.owner as string,
-            repo: integration.app as string,
-            secret_name: encryptedSecret.name
-          });
-          break;
+            });
+            break;
+          }
+          case GithubScope.Env: {
+            await octokit.request(
+              "DELETE /repositories/{repository_id}/environments/{environment_name}/secrets/{secret_name}",
+              {
+                repository_id: Number(integration.appId),
+                environment_name: integration.targetEnvironmentId as string,
+                secret_name: encryptedSecret.name
+              }
+            );
+            break;
+          }
+          default: {
+            await octokit.request("DELETE /repos/{owner}/{repo}/actions/secrets/{secret_name}", {
+              owner: integration.owner as string,
+              repo: integration.app as string,
+              secret_name: encryptedSecret.name
+            });
+            break;
+          }
         }
       }
     }
@@ -1917,13 +1931,13 @@ const syncSecretsGitLab = async ({
     return allEnvVariables;
   };
 
+  const metadata = IntegrationMetadataSchema.parse(integration.metadata);
   const allEnvVariables = await getAllEnvVariables(integration?.appId as string, accessToken);
   const getSecretsRes: GitLabSecret[] = allEnvVariables
     .filter((secret: GitLabSecret) => secret.environment_scope === integration.targetEnvironment)
     .filter((gitLabSecret) => {
       let isValid = true;
 
-      const metadata = z.record(z.any()).parse(integration.metadata);
       if (metadata.secretPrefix && !gitLabSecret.key.startsWith(metadata.secretPrefix)) {
         isValid = false;
       }
@@ -1943,8 +1957,8 @@ const syncSecretsGitLab = async ({
         {
           key,
           value: secrets[key].value,
-          protected: false,
-          masked: false,
+          protected: Boolean(metadata.shouldProtectSecrets),
+          masked: Boolean(metadata.shouldMaskSecrets),
           raw: false,
           environment_scope: integration.targetEnvironment
         },
@@ -1961,7 +1975,9 @@ const syncSecretsGitLab = async ({
         `${gitLabApiUrl}/v4/projects/${integration?.appId}/variables/${existingSecret.key}?filter[environment_scope]=${integration.targetEnvironment}`,
         {
           ...existingSecret,
-          value: secrets[existingSecret.key].value
+          value: secrets[existingSecret.key].value,
+          protected: Boolean(metadata.shouldProtectSecrets),
+          masked: Boolean(metadata.shouldMaskSecrets)
         },
         {
           headers: {
@@ -2650,7 +2666,9 @@ const syncSecretsHashiCorpVault = async ({
   accessId: string | null;
   accessToken: string;
 }) => {
-  if (!accessId) return;
+  if (!accessId) {
+    throw new Error("Access ID is required");
+  }
 
   interface LoginAppRoleRes {
     auth: {
@@ -2750,6 +2768,20 @@ const syncSecretsCloudflarePages = async ({
       }
     }
   );
+
+  const metadata = z.record(z.any()).parse(integration.metadata);
+  if (metadata.shouldAutoRedeploy) {
+    await request.post(
+      `${IntegrationUrls.CLOUDFLARE_PAGES_API_URL}/client/v4/accounts/${accessId}/pages/projects/${integration.app}/deployments`,
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json"
+        }
+      }
+    );
+  }
 };
 
 /**
@@ -3355,6 +3387,82 @@ const syncSecretsHasuraCloud = async ({
   }
 };
 
+/** Sync/push [secrets] to Rundeck
+ * @param {Object} obj
+ * @param {TIntegrations} obj.integration - integration details
+ * @param {Object} obj.secrets - secrets to push to integration (object where keys are secret keys and values are secret values)
+ * @param {String} obj.accessToken - access token for Rundeck integration
+ */
+const syncSecretsRundeck = async ({
+  integration,
+  secrets,
+  accessToken
+}: {
+  integration: TIntegrations;
+  secrets: Record<string, { value: string; comment?: string }>;
+  accessToken: string;
+}) => {
+  interface RundeckSecretResource {
+    name: string;
+  }
+  interface RundeckSecretsGetRes {
+    resources: RundeckSecretResource[];
+  }
+
+  let existingRundeckSecrets: string[] = [];
+
+  try {
+    const listResult = await request.get<RundeckSecretsGetRes>(
+      `${integration.url}/api/44/storage/${integration.path}`,
+      {
+        headers: {
+          "X-Rundeck-Auth-Token": accessToken
+        }
+      }
+    );
+
+    existingRundeckSecrets = listResult.data.resources.map((res) => res.name);
+  } catch (err) {
+    logger.info("No existing rundeck secrets");
+  }
+
+  try {
+    for await (const [key, value] of Object.entries(secrets)) {
+      if (existingRundeckSecrets.includes(key)) {
+        await request.put(`${integration.url}/api/44/storage/${integration.path}/${key}`, value.value, {
+          headers: {
+            "X-Rundeck-Auth-Token": accessToken,
+            "Content-Type": "application/x-rundeck-data-password"
+          }
+        });
+      } else {
+        await request.post(`${integration.url}/api/44/storage/${integration.path}/${key}`, value.value, {
+          headers: {
+            "X-Rundeck-Auth-Token": accessToken,
+            "Content-Type": "application/x-rundeck-data-password"
+          }
+        });
+      }
+    }
+
+    for await (const existingSecret of existingRundeckSecrets) {
+      if (!(existingSecret in secrets)) {
+        await request.delete(`${integration.url}/api/44/storage/${integration.path}/${existingSecret}`, {
+          headers: {
+            "X-Rundeck-Auth-Token": accessToken
+          }
+        });
+      }
+    }
+  } catch (err: unknown) {
+    throw new Error(
+      `Ensure that the provided Rundeck URL is accessible by Infisical and that the linked API token has sufficient permissions.\n\n${
+        (err as Error).message
+      }`
+    );
+  }
+};
+
 /**
  * Sync/push [secrets] to [app] in integration named [integration]
  *
@@ -3390,6 +3498,8 @@ export const syncIntegrationSecrets = async ({
   accessToken: string;
   appendices?: { prefix: string; suffix: string };
 }) => {
+  let response: { isSynced: boolean; syncMessage: string } | null = null;
+
   switch (integration.integration) {
     case Integrations.GCP_SECRET_MANAGER:
       await syncSecretsGCPSecretManager({
@@ -3406,7 +3516,7 @@ export const syncIntegrationSecrets = async ({
       });
       break;
     case Integrations.AWS_PARAMETER_STORE:
-      await syncSecretsAWSParameterStore({
+      response = await syncSecretsAWSParameterStore({
         integration,
         secrets,
         accessId,
@@ -3425,7 +3535,6 @@ export const syncIntegrationSecrets = async ({
       await syncSecretsHeroku({
         createManySecretsRawFn,
         updateManySecretsRawFn,
-        integrationDAL,
         integration,
         secrets,
         accessToken
@@ -3621,7 +3730,16 @@ export const syncIntegrationSecrets = async ({
         accessToken
       });
       break;
+    case Integrations.RUNDECK:
+      await syncSecretsRundeck({
+        integration,
+        secrets,
+        accessToken
+      });
+      break;
     default:
       throw new BadRequestError({ message: "Invalid integration" });
   }
+
+  return response;
 };
