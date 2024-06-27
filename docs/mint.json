@@ -178,7 +178,10 @@
             "documentation/platform/sso/azure",
             "documentation/platform/sso/jumpcloud",
             "documentation/platform/sso/keycloak-saml",
-            "documentation/platform/sso/google-saml"
+            "documentation/platform/sso/google-saml",
+            "documentation/platform/sso/keycloak-oidc",
+            "documentation/platform/sso/auth0-oidc",
+            "documentation/platform/sso/general-oidc"
           ]
         },
         {
@@ -219,7 +222,8 @@
           "group": "Guides",
           "pages": [
             "self-hosting/configuration/schema-migrations",
-            "self-hosting/guides/mongo-to-postgres"
+            "self-hosting/guides/mongo-to-postgres",
+            "self-hosting/guides/custom-certificates"
           ]
         },
         {
@@ -416,7 +420,9 @@
           "pages": [
             "api-reference/endpoints/identities/create",
             "api-reference/endpoints/identities/update",
-            "api-reference/endpoints/identities/delete"
+            "api-reference/endpoints/identities/delete",
+            "api-reference/endpoints/identities/get-by-id",
+            "api-reference/endpoints/identities/list"
           ]
         },
         {
@@ -426,9 +432,11 @@
             "api-reference/endpoints/universal-auth/attach",
             "api-reference/endpoints/universal-auth/retrieve",
             "api-reference/endpoints/universal-auth/update",
+            "api-reference/endpoints/universal-auth/revoke",
             "api-reference/endpoints/universal-auth/create-client-secret",
             "api-reference/endpoints/universal-auth/list-client-secrets",
             "api-reference/endpoints/universal-auth/revoke-client-secret",
+            "api-reference/endpoints/universal-auth/get-client-secret-by-id",
             "api-reference/endpoints/universal-auth/renew-access-token",
             "api-reference/endpoints/universal-auth/revoke-access-token"
           ]
