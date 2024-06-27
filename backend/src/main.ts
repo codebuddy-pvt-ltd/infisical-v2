@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import fs from "fs";
 
 import { initDbConnection } from "./db";
 import { keyStoreFactory } from "./keystore/keystore";
@@ -13,9 +14,11 @@ dotenv.config();
 const run = async () => {
   const logger = await initLogger();
   const appCfg = initEnvConfig(logger);
+  const dbRootCert = (await fs.promises.readFile("./global-bundle.pem", "utf-8")).toString();
+
   const db = initDbConnection({
     dbConnectionUri: appCfg.DB_CONNECTION_URI,
-    dbRootCert: appCfg.DB_ROOT_CERT
+    dbRootCert
   });
 
   const smtp = smtpServiceFactory(formatSmtpConfig());

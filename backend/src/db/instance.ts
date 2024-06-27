@@ -16,7 +16,7 @@ export const initDbConnection = ({ dbConnectionUri, dbRootCert }: { dbConnection
       ssl: dbRootCert
         ? {
             rejectUnauthorized: true,
-            ca: Buffer.from(dbRootCert, "base64").toString("ascii")
+            ca: dbRootCert
           }
         : false
     }

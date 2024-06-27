@@ -4,6 +4,7 @@ import "ts-node/register";
 import dotenv from "dotenv";
 import type { Knex } from "knex";
 import path from "path";
+import fs from "fs";
 
 // Update with your config settings. .
 dotenv.config({
@@ -23,12 +24,10 @@ export default {
       user: process.env.DB_USER,
       database: process.env.DB_NAME,
       password: process.env.DB_PASSWORD,
-      ssl: process.env.DB_ROOT_CERT
-        ? {
-            rejectUnauthorized: true,
-            ca: Buffer.from(process.env.DB_ROOT_CERT, "base64").toString("ascii")
-          }
-        : false
+      ssl: {
+        rejectUnauthorized: true,
+        ca: fs.readFileSync("../../global-bundle.pem", "utf-8").toString()
+      }
     },
     pool: {
       min: 2,
